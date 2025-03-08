@@ -206,9 +206,16 @@ class AgentBase:
         self.soft_update_tau = args.soft_update_tau
 
         self.states = None  # assert self.states == (1, state_dim)
-        self.device = torch.device(
-            f"cuda:{gpu_id}" if (torch.cuda.is_available() and (gpu_id >= 0)) else "cpu"
-        )
+        #self.device = torch.device(
+        #    f"cuda:{gpu_id}" if (torch.cuda.is_available() and (gpu_id >= 0)) else "cpu"
+        #)
+
+        if torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+            print(f"使用MPS设备: {self.device}")
+        else:
+            self.device = torch.device( "cpu")
+            print(f"使用CPU设备: {self.device}")
 
         act_class = getattr(self, "act_class", None)
         cri_class = getattr(self, "cri_class", None)
@@ -243,6 +250,14 @@ class AgentBase:
         for tar, cur in zip(target_net.parameters(), current_net.parameters()):
             tar.data.copy_(cur.data * tau + tar.data * (1.0 - tau))
 
+def pad_observation(obs, target_length=333):
+    if obs.size == 0:
+        obs = np.zeros(target_length)  # 处理空数据
+    elif len(obs) < target_length:
+        obs = np.pad(obs, (0, target_length - len(obs)))  # 填充零
+    else:
+        obs = obs[:target_length]  # 截断
+    return obs
 
 class AgentPPO(AgentBase):
     def __init__(
@@ -287,13 +302,20 @@ class AgentPPO(AgentBase):
         get_action = self.act.get_action
         convert = self.act.convert_action_for_env
         for i in range(horizon_len):
+            ary_state = pad_observation(ary_state, target_length=333)
+            # 确保状态为 NumPy 数组并统一维度
+            ary_state = np.array(ary_state)
             state = torch.as_tensor(ary_state, dtype=torch.float32, device=self.device)
             action, logprob = (t.squeeze(0) for t in get_action(state.unsqueeze(0))[:2])
 
-            ary_action = convert(action).detach().cpu().numpy()
-            ary_state, reward, done, _ = env.step(ary_action)
+            #ary_action = convert(action).detach().cpu().numpy()
+            ary_action_tensor = convert(action).detach()  # 保持在 GPU 上
+            ary_action = ary_action_tensor.cpu().numpy()  # 在需要时转换为 NumPy 数组
+
+            ary_state, reward, terminated, truncated, _ = env.step(ary_action)
+            done = terminated or truncated  # 合并终止条件
             if done:
-                ary_state = env.reset()
+                ary_state, _ = env.reset()  # 重置环境
 
             states[i] = state
             actions[i] = action
@@ -423,7 +445,19 @@ def train_agent(args: Config):
     agent = args.agent_class(
         args.net_dims, args.state_dim, args.action_dim, gpu_id=args.gpu_id, args=args
     )
-    agent.states = env.reset()[np.newaxis, :]
+
+    #state, info = env.reset()
+    #print("State:", state)
+    #print("Info:", info)   
+    #state = state[np.newaxis, :]  # 对状态进行维度扩展
+    #agent.states = state  # 将处理后的状态赋值给 agent.states
+    #agent.states = env.reset()[np.newaxis, :]
+    result = env.reset()
+    if isinstance(result, tuple):  # 新版 Gym 返回元组
+        obs = result[0]
+    else:  # 旧版 Gym 返回单个观测值
+        obs = result
+    agent.states = obs[np.newaxis, :]
 
     evaluator = Evaluator(
         eval_env=build_env(args.env_class, args.env_args),
@@ -530,18 +564,38 @@ def get_rewards_and_steps(
 ) -> (float, int):  # cumulative_rewards and episode_steps
     device = next(actor.parameters()).device  # net.parameters() is a Python generator.
 
-    state = env.reset()
+    # 修改前（错误）
+    state = env.reset()  # 返回元组 (observation, info)
+    # 修改后（正确）
+    state, info = env.reset()  # 解包元组，提取观测值
+
     episode_steps = 0
     cumulative_returns = 0.0  # sum of rewards in an episode
     for episode_steps in range(12345):
-        tensor_state = torch.as_tensor(
-            state, dtype=torch.float32, device=device
-        ).unsqueeze(0)
+        #tensor_state = torch.as_tensor(
+        #    state, dtype=torch.float32, device=device
+        #).unsqueeze(0)
+        # 修改后（高效）
+        # 处理可能的元组输入（双重保险）
+        if isinstance(state, tuple):
+            state = state[0]  # 提取观测值部分
+        state = pad_observation(state)  # 统一维度
+
+        state_array = np.array(state)  # 将列表转换为 NumPy 数组
+        tensor_state = torch.as_tensor(state_array, dtype=torch.float32, device=device).unsqueeze(0)
+
         tensor_action = actor(tensor_state)
-        action = (
-            tensor_action.detach().cpu().numpy()[0]
-        )  # not need detach(), because using torch.no_grad() outside
-        state, reward, done, _ = env.step(action)
+        #action = (
+        #    tensor_action.detach().cpu().numpy()[0]
+        #)  # not need detach(), because using torch.no_grad() outside
+        action = tensor_action.detach()[0]  # 保持在 GPU 上
+        action_np = action.cpu().numpy()  # 在需要时转换为 NumPy 数组
+        #state, reward, done, _ = env.step(action)
+        state, reward, terminated, truncated, _ = env.step(action_np)
+        done = terminated or truncated
+        if done:
+            state, _ = env.reset()  # 重置环境并获取新状态
+
         cumulative_returns += reward
 
         if if_render:
@@ -657,17 +711,34 @@ class DRLAgent:
 
         # test on the testing env
         _torch = torch
-        state = environment.reset()
+        #state = environment.reset()
+         # 修改后（正确）
+        state, info = environment.reset()  # 解包元组，提取观测值
         episode_returns = []  # the cumulative_return / initial_account
         episode_total_assets = [environment.initial_total_asset]
         with _torch.no_grad():
             for i in range(environment.max_step):
-                s_tensor = _torch.as_tensor((state,), device=device)
+                # 处理可能的元组输入（双重保险）
+                if isinstance(state, tuple):
+                    state = state[0]  # 提取观测值部分
+                state = pad_observation(state)  # 统一维度
+                # 确保状态为 NumPy 数组并统一维度
+                #state = np.array(state)
+                #s_tensor = _torch.as_tensor((state,), device=device)
+                state_array = np.array(state)  # 将列表转换为 NumPy 数组
+                s_tensor = _torch.as_tensor(state_array, dtype=torch.float32, device=device).unsqueeze(0)
                 a_tensor = act(s_tensor)  # action_tanh = act.forward()
-                action = (
-                    a_tensor.detach().cpu().numpy()[0]
-                )  # not need detach(), because with torch.no_grad() outside
-                state, reward, done, _ = environment.step(action)
+                #action = (
+                #    a_tensor.detach().cpu().numpy()[0]
+                #)  # not need detach(), because with torch.no_grad() outside
+                action = a_tensor.detach()[0]  # 保持在 GPU 上
+                action_np = action.cpu().numpy()  # 在需要时转换为 NumPy 数组
+            
+                #state, reward, done, _ = environment.step(action)
+                state, reward, terminated, truncated, _ = environment.step(action_np)
+                done = terminated or truncated
+                if done:
+                    state, _ = environment.reset()  # 重置环境并获取新状态
 
                 total_asset = (
                     environment.amount

@@ -3,7 +3,7 @@
 # %pip install --upgrade git+https://github.com/AI4Finance-Foundation/FinRL.git
 # Alpaca keys
 from __future__ import annotations
-
+"""
 import argparse
 
 parser = argparse.ArgumentParser()
@@ -14,12 +14,26 @@ parser.add_argument("trading_key", help="trading api key")
 parser.add_argument("trading_secret", help="trading api secret")
 parser.add_argument("trading_url", help="trading api base url")
 args = parser.parse_args()
+
 DATA_API_KEY = args.data_key
 DATA_API_SECRET = args.data_secret
 DATA_API_BASE_URL = args.data_url
 TRADING_API_KEY = args.trading_key
 TRADING_API_SECRET = args.trading_secret
 TRADING_API_BASE_URL = args.trading_url
+"""
+
+DATA_API_KEY = "AKYLMZHF16Y58RK2KH1G"
+DATA_API_SECRET = "Nw02l0Db4F7a5vaVGTdCXf1tVjBXdy6mPjZXDTKm"
+#DATA_API_BASE_URL = "https://api.alpaca.markets"
+#TRADING_API_KEY = "AKYLMZHF16Y58RK2KH1G"
+#TRADING_API_SECRET = "Nw02l0Db4F7a5vaVGTdCXf1tVjBXdy6mPjZXDTKm"
+#TRADING_API_BASE_URL = "https://api.alpaca.markets"
+
+DATA_API_BASE_URL = "https://paper-api.alpaca.markets"
+TRADING_API_KEY = "PKBJJZYERCQTT623ZOYU"
+TRADING_API_SECRET = "XUdS7L8CJkMz1o03SaIf3AMpx17wqeuDOQCUq2Ve"
+TRADING_API_BASE_URL = "https://paper-api.alpaca.markets"
 
 print("DATA_API_KEY: ", DATA_API_KEY)
 print("DATA_API_SECRET: ", DATA_API_SECRET)

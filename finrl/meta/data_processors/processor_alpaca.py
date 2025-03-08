@@ -429,12 +429,12 @@ class AlpacaProcessor:
             # Set 'timestamp' as the new index
             if "level_0" in barset.columns:
                 barset.rename(columns={"level_0": "symbol"}, inplace=True)
-            if "level_1" in bars.columns:
+            if "level_1" in barset.columns:
                 barset.rename(columns={"level_1": "timestamp"}, inplace=True)
             barset.set_index("timestamp", inplace=True)
 
             # Reorder and rename columns as needed
-            barset = bars[
+            barset = barset[
                 [
                     "close",
                     "high",

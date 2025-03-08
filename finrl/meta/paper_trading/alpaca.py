@@ -95,6 +95,9 @@ class PaperTradingAlpaca:
         # connect to Alpaca trading API
         try:
             self.alpaca = tradeapi.REST(API_KEY, API_SECRET, API_BASE_URL, "v2")
+            self.API_KEY = API_KEY
+            self.API_SECRET = API_SECRET
+            self.API_BASE_URL = API_BASE_URL
         except:
             raise ValueError(
                 "Fail to connect Alpaca. Please check account info and internet connection."
@@ -210,33 +213,43 @@ class PaperTradingAlpaca:
             isOpen = self.alpaca.get_clock().is_open
 
     def trade(self):
+        print("开始执行交易决策...")
         state = self.get_state()
 
         if self.drl_lib == "elegantrl":
+            print("使用 ElegantRL 模型进行预测...")
             with torch.no_grad():
-                s_tensor = torch.as_tensor((state,), device=self.device)
+                s_tensor = torch.as_tensor(np.array([state]), device=self.device)
                 a_tensor = self.act(s_tensor)
                 action = a_tensor.detach().cpu().numpy()[0]
             action = (action * self.max_stock).astype(int)
+            print(f"模型预测完成，建议操作：{action}")
 
         elif self.drl_lib == "rllib":
+            print("使用 RLlib 模型进行预测...")
             action = self.agent.compute_single_action(state)
 
         elif self.drl_lib == "stable_baselines3":
+            print("使用 Stable-Baselines3 模型进行预测...")
             action = self.model.predict(state)[0]
 
         else:
-            raise ValueError(
-                "The DRL library input is NOT supported yet. Please check your input."
-            )
+            raise ValueError("不支持的深度强化学习库，请检查输入。")
 
         self.stocks_cd += 1
         if self.turbulence_bool == 0:
+            print("市场状态正常，开始执行交易...")
             min_action = 10  # stock_cd
             threads = []
-            for index in np.where(action < -min_action)[0]:  # sell_index:
+            
+            # 处理卖出操作
+            sell_indices = np.where(action < -min_action)[0]
+            if len(sell_indices) > 0:
+                print(f"准备卖出操作，共 {len(sell_indices)} 支股票...")
+            for index in sell_indices:  # sell_index:
                 sell_num_shares = min(self.stocks[index], -action[index])
                 qty = abs(int(sell_num_shares))
+                print(f"卖出股票 {self.stockUniverse[index]}，数量：{qty}")
                 respSO = []
                 tSubmitOrder = threading.Thread(
                     target=self.submitOrder(
@@ -244,15 +257,21 @@ class PaperTradingAlpaca:
                     )
                 )
                 tSubmitOrder.start()
-                threads.append(tSubmitOrder)  # record thread for joining later
+                threads.append(tSubmitOrder)
                 self.cash = float(self.alpaca.get_account().cash)
                 self.stocks_cd[index] = 0
 
-            for x in threads:  #  wait for all threads to complete
+            if threads:
+                print("等待卖出订单完成...")
+            for x in threads:
                 x.join()
 
+            # 处理买入操作
             threads = []
-            for index in np.where(action > min_action)[0]:  # buy_index:
+            buy_indices = np.where(action > min_action)[0]
+            if len(buy_indices) > 0:
+                print(f"准备买入操作，共 {len(buy_indices)} 支股票...")
+            for index in buy_indices:
                 if self.cash < 0:
                     tmp_cash = 0
                 else:
@@ -261,9 +280,11 @@ class PaperTradingAlpaca:
                     tmp_cash // self.price[index], abs(int(action[index]))
                 )
                 if buy_num_shares != buy_num_shares:  # if buy_num_change = nan
-                    qty = 0  # set to 0 quantity
+                    qty = 0
                 else:
                     qty = abs(int(buy_num_shares))
+                if qty > 0:
+                    print(f"买入股票 {self.stockUniverse[index]}，数量：{qty}")
                 respSO = []
                 tSubmitOrder = threading.Thread(
                     target=self.submitOrder(
@@ -271,14 +292,17 @@ class PaperTradingAlpaca:
                     )
                 )
                 tSubmitOrder.start()
-                threads.append(tSubmitOrder)  # record thread for joining later
+                threads.append(tSubmitOrder)
                 self.cash = float(self.alpaca.get_account().cash)
                 self.stocks_cd[index] = 0
 
-            for x in threads:  #  wait for all threads to complete
+            if threads:
+                print("等待买入订单完成...")
+            for x in threads:
                 x.join()
 
-        else:  # sell all when turbulence
+        else:
+            print("检测到市场波动，执行清仓操作...")
             threads = []
             positions = self.alpaca.list_positions()
             for position in positions:
@@ -287,40 +311,54 @@ class PaperTradingAlpaca:
                 else:
                     orderSide = "buy"
                 qty = abs(int(float(position.qty)))
+                print(f"清仓操作：{orderSide} {position.symbol}，数量：{qty}")
                 respSO = []
                 tSubmitOrder = threading.Thread(
                     target=self.submitOrder(qty, position.symbol, orderSide, respSO)
                 )
                 tSubmitOrder.start()
-                threads.append(tSubmitOrder)  # record thread for joining later
+                threads.append(tSubmitOrder)
 
-            for x in threads:  #  wait for all threads to complete
+            if threads:
+                print("等待清仓订单完成...")
+            for x in threads:
                 x.join()
 
             self.stocks_cd[:] = 0
+        print("交易决策执行完成")
 
     def get_state(self):
-        alpaca = AlpacaProcessor(api=self.alpaca)
+        print("开始获取市场状态...")
+        alpaca = AlpacaProcessor(API_KEY=self.API_KEY, API_SECRET=self.API_SECRET, API_BASE_URL=self.API_BASE_URL)
+        print("获取最新市场数据...")
         price, tech, turbulence = alpaca.fetch_latest_data(
             ticker_list=self.stockUniverse,
             time_interval="1Min",
             tech_indicator_list=self.tech_indicator_list,
         )
         turbulence_bool = 1 if turbulence >= self.turbulence_thresh else 0
+        print(f"市场波动状态: {'异常' if turbulence_bool else '正常'}")
 
         turbulence = (
             self.sigmoid_sign(turbulence, self.turbulence_thresh) * 2**-5
         ).astype(np.float32)
 
         tech = tech * 2**-7
+        print("获取当前持仓信息...")
         positions = self.alpaca.list_positions()
         stocks = [0] * len(self.stockUniverse)
         for position in positions:
-            ind = self.stockUniverse.index(position.symbol)
-            stocks[ind] = abs(int(float(position.qty)))
+            try:
+                ind = self.stockUniverse.index(position.symbol)
+                stocks[ind] = abs(int(float(position.qty)))
+                print(f"当前持仓: {position.symbol} - {stocks[ind]}股")
+            except ValueError:
+                print(f"警告：账户中存在不在交易列表中的股票 {position.symbol}，已跳过")
+                continue
 
         stocks = np.asarray(stocks, dtype=float)
         cash = float(self.alpaca.get_account().cash)
+        print(f"当前现金: ${cash:.2f}")
         self.cash = cash
         self.stocks = stocks
         self.turbulence_bool = turbulence_bool
@@ -341,46 +379,20 @@ class PaperTradingAlpaca:
         ).astype(np.float32)
         state[np.isnan(state)] = 0.0
         state[np.isinf(state)] = 0.0
-        # print(len(self.stockUniverse))
+        print("市场状态获取完成")
         return state
 
     def submitOrder(self, qty, stock, side, resp):
         if qty > 0:
             try:
                 self.alpaca.submit_order(stock, qty, side, "market", "day")
-                print(
-                    "Market order of | "
-                    + str(qty)
-                    + " "
-                    + stock
-                    + " "
-                    + side
-                    + " | completed."
-                )
+                print(f"订单执行成功: {side} {qty}股 {stock}")
                 resp.append(True)
-            except:
-                print(
-                    "Order of | "
-                    + str(qty)
-                    + " "
-                    + stock
-                    + " "
-                    + side
-                    + " | did not go through."
-                )
+            except Exception as e:
+                print(f"订单执行失败: {side} {qty}股 {stock}")
+                print(f"错误信息: {str(e)}")
                 resp.append(False)
         else:
-            """
-            print(
-                "Quantity is 0, order of | "
-                + str(qty)
-                + " "
-                + stock
-                + " "
-                + side
-                + " | not completed."
-            )
-            """
             resp.append(True)
 
     @staticmethod
